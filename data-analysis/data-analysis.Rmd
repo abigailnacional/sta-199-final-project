@@ -1,0 +1,352 @@
+---
+title: "Video Game Sales"
+author: "Team Octopi"
+date: "11/21/19"
+output: github_document
+---
+
+```{r load-packages, message=FALSE}
+library(tidyverse)
+library(broom)
+library(knitr)
+library(modelr)
+library(infer)
+library(dplyr)
+```
+
+```{r load-data}
+set.seed(24601)
+vgsales <- read_csv("/cloud/project/data/vgsales.csv")
+vgsales_top_100 <- vgsales %>%
+  head(100)
+vgsales_random_1000 <- sample_n(vgsales, 1000)
+
+vgsales
+vgsales_top_100
+vgsales_random_1000
+```
+
+### Main Research Questions
+
+1. What criteria (publishers, plaftorms, etc) make for successful video games in terms of global sales? What criteria make for successful video game publishers in terms of global sales?
+
+2. What are the overall trends of sales through time and space (geographic region) for video games released after 1980?
+
+### 1A: Does the year of a game's release affect its success?
+
+```{r median-global-games-by-century}
+vgsales_random_1000 <- vgsales_random_1000 %>%
+  mutate(centurygame = case_when(Year > 1999 ~ "21st",
+                                 Year > 1900 | Year <= 1999 ~ "20th"))
+
+ggplot(data = vgsales_random_1000, mapping = aes(x = Global_Sales))+
+  geom_histogram(binwidth = 0.5)
+
+vgsales_random_1000 %>%
+  filter(centurygame == "20th") %>%
+  summarise(median_global = median(Global_Sales))
+vgsales_random_1000 %>%
+  filter(centurygame == "21st") %>%
+  summarise(median_global = median(Global_Sales))
+```
+
+We wanted to know whether or not older games have a higher median global sales than newer games to test whether a game's release year affects it's success (as success is generally mapped to the amount of global sales a game recieves).  For this test, we chose to use a randomly sampled vgsales data set of size 1000 to represent the entire game "population".  We chose to analyze the median global sales rather than the mean of global sales because our data is highly skewed-right (as seen in the histogram above). Above, we separated our games by release in the 20th and 21st century in order to see whether or not newer games yield more sales than older games.  We then calculated the median global sales for games made in the 21st and 20th century and found that our older (20th century) games have a higher mean sales of `r vgsales_random_1000 %>% filter(centurygame == "20th") %>% summarise(median_global = median(Global_Sales))` versus a median sales of 21st century games, valued at `r vgsales_random_1000 %>% filter(centurygame == "21st") %>% summarise(median_global = median(Global_Sales))`. Our initial impression of this was to say that "21st century games on average have a higher global sales then 20th century games in the top 100 game sales," but we wanted to explore this a little deeper.  We decided to conduct a hypothesis test to see whether or not there was a significant difference in median global sales of older (20th) vs newer (21st) games that might suggest dependence between a game's global sales and the year it was released.  This is done below:
+
+H0: Our null hypothesis is that there is no difference in our median global sales between 20th and 21st century games zero (meaning that year of release and global sales are independent).
+
+HA: Our alternative hypothesis is that the difference in the median global sales between 20th and 21st century games is more extreme than our observed difference (meaning that year of release and global sales are dependent).
+
+```{r hypothesis-century}
+set.seed(24601)
+vgsales_20th_median <- vgsales_random_1000 %>%
+  filter(centurygame == "20th") %>%
+  summarise(median_global = median(Global_Sales))
+
+vgsales_21st_median <- vgsales_random_1000 %>%
+  filter(centurygame == "21st") %>%
+  summarise(median_global = median(Global_Sales))
+
+vgsales_median_difference <- vgsales_20th_median - vgsales_21st_median
+
+median_diff_null_dist <- vgsales_random_1000 %>%
+  specify(response = Global_Sales, explanatory = centurygame) %>%
+  hypothesize(null = "independence") %>%
+  generate(reps = 1000, type = "permute") %>%
+  calculate(stat = "diff in medians", order = c("20th", "21st"))
+
+get_p_value(median_diff_null_dist, obs_stat = vgsales_median_difference,
+            direction = "both")
+
+visualise(median_diff_null_dist)
+```
+
+Above we conducted a hypothesis test by generating a permutation of 1000 reps calculating for the difference in medians.  Our null distribution is visualized above.  We then calculated a two-tailed p-value represented as the proportion of our calculated differences that were more extreme than our observed difference both in the negative and positive directions. (`r vgsales_median_difference` for the positive and `r vgsales_median_difference * -1` for the negative direction).  Our two-tailed p-value was `r get_p_value(median_diff_null_dist, obs_stat = vgsales_median_difference, direction = "both")`, which is greater than our alpha value of .05, meaning that we fail to reject the null hypothesis that there is no significant difference in the mean global sales of 20th and 21st century games.  Unfortunately, this means that our data does not provide us with enough evidence to determine whether or not the century in which the game was released affects the amount of global sales it recieves.
+
+### 1B: What are the qualities of a popular videogame, as measured by ranking being lower in number (closer to 1)? 
+
+First, we will fit a full model predicting rank (new_rankings) from
+Platform, Year, Genre (Popular), Publisher (Publisher_Nintendo), NA_Sales, EU_Sales, JP_Sales, Other_Sales, and Global_Sales. We also included an interaction variable between Global_Sales and Publisher_Nintendo. The dataset vgsale_top_100 was used because we are trying to determine the factors that make a higher ranked videogame.
+
+For this model, *new_rankings* is a newly created variable  that reverses the rankings so that 1 is the best and 100 is the worst. *Genre* from the original dataset was modified to *Popular* due to the high volume of genres. If the genre of the videogame was greater than or equal to 10 on the ranking list, it is considered "Popular." If it was any lower in ranking, it was "Not Popular." The *Publisher* variable was also modified due to high numbers of publishers. Because Nintendo had the most top ranked video games by a landslide, *Publisher* was categorized into "Nintendo" or "Not Nintendo" by the new *Publisher_Nintendo* variable created. We should do random sampling for the linear model.
+
+``` {r data_modification}
+top_n <- vgsales_top_100 %>%
+  count(Genre)%>%
+  arrange(desc(n)) %>%
+  filter(n >= 10)
+top_genres <- top_n$Genre
+
+vgsales_top_100 %>%
+  count(Publisher) %>%
+  arrange(desc(n))
+
+
+vgsales_top_Genres <- vgsales_top_100 %>%
+  mutate(Popular = ifelse(Genre == top_genres, "Popular", "Not Popular"),
+         Year = as.numeric(Year), 
+Publisher_Nintendo = case_when(
+  Publisher == "Nintendo" ~ "Nintendo",
+  TRUE ~ "Not Nintendo"
+))
+
+
+```
+
+``` {r model}
+m_full <- lm(Rank ~ Platform + Year + Popular + Publisher_Nintendo + NA_Sales +
+               EU_Sales + JP_Sales + Other_Sales + Global_Sales + Global_Sales*Publisher_Nintendo,
+ data = vgsales_top_Genres)
+
+m_full
+```
+
+Backward selection using AIC as the decision criterion was used to determine the "best" model:
+
+``` {r backwards}
+model_sel <- step(m_full, direction = "backward")
+```
+
+```{r tidy}
+model_sel %>%
+ tidy() %>%
+ select(term, estimate) %>%
+ mutate(estimate = round(estimate, 3))
+```
+
+`new_rankings-hat` = 84.490 + 51.037* `Publisher_NintendoNot Nintendo` + 4.117* `NA_Sales` + 4.351* `EU_Sales` + 5.787* `Other_Sales` - 5.883* `Global_Sales` - 5.065* `Publisher_NintendoNot Nintendo:Global_Sales`
+
+For games that are Not Published by Nintendo, the ranking is expected to increase (become worse) by an average of approximately 51 rankings holding all else constant, compared to the baseline which is the Publisher being Nintendo. 
+
+The interaction variable tells us that given the publisher is not nintendo, as global sales increases by one unit, ranking is expected to lower (get better) by 5.065.
+
+The final model found in the previous question included the variables Publisher_NintendoNot Nintendo, NA_Sales, EU_Sales, Other_Sales, Global_Sales, and the interaction between Publisher_NintendoNot Nintendo and Global_Sales. All of these variables have an effect on the ranking of a videogame.
+
+A videogame that is published by Nintendo and reaches global sales is predicted to have the highest rankings (be rated closer to 1).
+
+``` {r r-squared}
+glance(model_sel)$r.squared
+```
+
+R-squared value: 0.7390596
+
+The R-squared value shows that roughly 73.91% of the variablility in videogame ranking can be explained by the final selected model.
+
+Because in this dataset the rankings are made off of the global sales, it makes sense that the global sales are in the final model and have an effect on the ranking. A more surprising result is that the publisher has such a profound affect on the rating. Nintendo seems to be making the most global unit sales, which is making them ranked higher on the list.
+
+## 1C: How does the publisher affect global sales?
+
+```{r top-publishers-by-year}
+vgsales_top_100 %>%
+    group_by(Year, Publisher) %>%
+    summarize(Sales = sum(Global_Sales)) %>%
+  arrange(desc(Sales)) %>%
+  head(10)
+```
+
+The data shows the top ten video publishers based on global video game sales. Nintendo holds 8/10 positions.
+
+```{r top-5-publishers}
+vgsales_top_100 %>%
+    group_by(Year, Publisher) %>%
+    summarize(Sales = sum(Global_Sales)) %>%
+  group_by(Publisher) %>%
+  summarise(n = sum(Sales)) %>%
+  arrange(desc(n)) %>%
+  head(5)
+```
+
+Top 5 publishers: Nintendo, Activision, Take-Two Interactive, Sony Computer Entertainment, Microsoft Game Studios.
+
+```{r linear-model}
+lm <- lm(Global_Sales ~ Publisher, data = vgsales_top_100)
+lm
+glance(lm)$r.squared
+```
+
+Since the model has too many categorical variables, it will not be written out. However, since the r-squared value is 12.5%, this model can only predict 12.5% of the variability of global sales of games based on publisher, publisher is therefore not a good indicator of global sales of a video game. 
+
+### 2 What are the overall trends of sales through time and space (geographic region) for video games released after 1980?
+
+Below is the visualization for Global Video Games based on the Year of Release.
+``` {r visualize_dist}
+vgsales %>%
+  filter(Year <= 2019) %>%
+    group_by(Year) %>%
+    summarize(Sales = sum(Global_Sales, na.rm = TRUE)) %>%
+    ggplot(aes(x = Year, y = Sales)) +
+    geom_col() +
+  coord_flip() +
+    labs(title = "Global Sales Histograms", x = "Year", y = "Sales (units)")
+```
+
+We can see that there was a large peak of sales for video games released in the late 2000's and early 2010's. Total sales of video games rose from 1980 to around 2010, with games being released in those years gaining more sales than games released in years previous to it. However, after around 2010, games released did not perform as well as games released around 2010. 
+
+``` {r visualize_dist_region}
+vgsales_yearly <- vgsales %>%
+  filter(!Year >= 2019) %>%
+  group_by(Year) %>%
+  summarize(Total_NA_sales = sum(NA_Sales, na.rm = TRUE), Total_EU_sales = sum(EU_Sales, na.rm = TRUE), Total_JP_sales = sum(JP_Sales, na.rm = TRUE), Total_Other_sales = sum(Other_Sales, na.rm = TRUE)) 
+
+ggplot(vgsales_yearly, aes(x = Year, y = value, color = variable)) +
+  geom_point(aes(y = Total_NA_sales, col = "Total_NA_sales")) +
+  geom_point(aes(y = Total_EU_sales, col = "Total_EU_sales")) +
+  geom_point(aes(y = Total_JP_sales, col = "Total_JP_sales")) +
+  geom_point(aes(y = Total_Other_sales, col = "Total_Other_sales")) +
+  scale_x_discrete(breaks=seq(1970, 2025 , 10))
+```
+
+From this graph, we can see that sales by region were around the same from 1980 to 1995. However, after 1995, total sales from North American increased much more than total sales in other regions. We can also see the overall trend of sales peaking in 2010 before dropping after 2010. 
+
+```{r subset}
+vgsales20th <- vgsales %>%
+  filter(Year < 2000)
+
+vgsales21st <- vgsales %>%
+  filter(Year >= 2000)
+```
+
+```{r graphs}
+ggplot(vgsales20th, aes(x = Genre, y = Global_Sales)) +
+  geom_col() +
+  coord_flip()
+  
+ggplot(vgsales21st, aes(x = Genre, y = Global_Sales)) +
+  geom_col() +
+  coord_flip()
+```
+
+Above are two graphs showing the breakdown of genre for total global sales for the 20th and 21st century. We can see that there are some drastic differences in popular genres, with some genres outperforming others based on global sales. We can also see that the popular genres changed between centuries. One particular genre, action, will be explored. 
+
+```{r proportions}
+vgsales %>%
+  group_by(Genre) %>%
+  summarise(Total_Global_sales = sum(Global_Sales, na.rm = TRUE)) %>%
+  mutate(prop = Total_Global_sales / sum(Total_Global_sales)) %>%
+  arrange(desc(prop))
+
+vgsales20th %>%
+  group_by(Genre) %>%
+  summarise(Total_Global_sales = sum(Global_Sales, na.rm = TRUE)) %>%
+  mutate(prop = Total_Global_sales / sum(Total_Global_sales)) %>%
+  arrange(desc(prop))
+
+vgsales21st %>%
+  group_by(Genre) %>%
+  summarise(Total_Global_sales = sum(Global_Sales, na.rm = TRUE)) %>%
+  mutate(prop = Total_Global_sales / sum(Total_Global_sales)) %>%
+  arrange(desc(prop))
+```
+
+```{r century-action}
+vgsales_action <- vgsales %>%
+ filter(!is.na(Genre), !is.na(Year)) %>%
+ mutate(Genre = case_when(
+    Genre == "Action" ~ "Action",
+    Genre != "Action" ~ "Not Action")) %>%
+  mutate(Century = case_when(
+    Year < 2000 ~ "20th",
+    Year >= 2000 ~ "21st"))
+vgsales_action %>%
+ count(Genre, Century) %>%
+ group_by(Century) %>%
+ mutate(p_hat = n / sum(n))
+```
+
+We will conduct a hypothesis test of the difference in proportions.
+
+H0: There is no difference in the proportions of video game sales which are action between the 21st and 20th Century
+
+HA: There is a difference in the proportions of video game sales which are action between the 21st and 20th Century
+
+```{r null-dist-employment, eval = FALSE}
+null_dist_action <- vgsales_action %>%
+ specify(response = Genre, 
+         explanatory = Century, 
+         success = "Action") %>%
+  hypothesize(null="independence") %>%
+  generate(reps=1000, type="permute") %>%
+ calculate(stat="diff in props", order=c("21st","20th"))
+ggplot(null_dist_action, aes(x=stat)) +
+  geom_histogram() + 
+  labs(title = "Distribution of Differences in Action Video Games",
+       subtitle = "by Year")
+```
+
+The code above has eval = FALSE because I talked to Salvador after this particular chunk would not knit, but it would run in the rmd file. Salvador told me to put that and say that it would not knit after waiting for 10 minutes, but that I got the results. 
+
+```{r create-difference}
+(diff_prop = 0.2125 - 0.1152)
+```
+
+```{r p-value-employment, eval = FALSE}
+null_dist_action %>%
+ filter(stat >= diff_prop | stat <= -1*diff_prop) %>%
+ summarise(p_val=n()/nrow(null_dist_action))
+```
+
+Although this cannot knit, when I ran it in the rmd, it showed a p value of 0. Looking back at the distribution, we can confirm that 0 of the null distribution had values as extreme as the difference in proportion of 0.09 observed. Since this value is below 0.05, we can reject the null that there is no difference in the proportions of video game sales which are action between the 21st and 20th Century. We have enough evidence to suggest that there is a difference in the proportions of video game sales which are action between the 21st and 20th Century.
+
+### 2B: Do qualities of a popular video game vary by country?
+
+In order to answer this question, we chose to create a linear model of total sales by country using all the relevant variables (`Publisher`, `centurygame`, `Genre`, `Platform`) as well as an interaction between `Genre and Platform`.  We then used backwards selection with AIC to see whether or not countries prioritize some qualities over others.
+
+```{r linear-models-by-country}
+kable(tidy(lm_NA <- lm(NA_Sales ~ Publisher + centurygame + Genre + Platform +
+                         Genre*Platform, data = vgsales_random_1000)) %>%
+  select(term, estimate), format = "html")
+
+kable(tidy(lm_EU <- lm(EU_Sales ~ Publisher + centurygame + Genre + Platform +
+                         Genre*Platform, data = vgsales_random_1000)) %>%
+  select(term, estimate), format = "html")
+
+kable(tidy(lm_JP <- lm(JP_Sales ~ Publisher + centurygame + Genre + Platform +
+                         Genre*Platform, data = vgsales_random_1000)) %>%
+  select(term, estimate), format = "html")
+```
+
+```{r backwards-selection-AIC-Models}
+kable(tidy(model_sel_NA <- step(lm_NA, direction = "backward",
+                                trace = FALSE)) %>%
+  select(term, estimate), format = "html")
+
+kable(tidy(model_sel_EU <- step(lm_EU, direction = "backward",
+                                trace = FALSE)) %>%
+  select(term, estimate), format = "html")
+
+kable(tidy(model_sel_JP <- step(lm_JP, direction = "backward",
+                                trace = FALSE)) %>%
+  select(term, estimate), format = "html")
+```
+
+From our backwards selection, we can see that each country values the same qualities when it comes to what makes a game successful.  That is, they value the platform on which the game is released, the genre of the game, and the game's publisher.
+
+### Overall: Big conclusions from the data
+
+
+Overall, we can conclude from our data that global sales and the publisher, specifically if the publisher is Nintendo or not, has a big impact on the ranking of a videogame. Surprisingly, we could not conclude from our data that the century in which a game was released has any impact on the global sales, which was a surprise to us because we thought that videogames from the 21st century would have higher global sales than those of the 20th century, due to an increase in popularity of video games as well as an increase of the amount of devices available to play them on.  Interestingly enough though, when fitting linear models based on the sales produced in each country, we found that for Japan, the century in which the game released was considered a characteristic that significantly affected its total sales units.  This was not the case in Europe or North America though, as our *centurygame* variable was eliminated when using backwards selection based on AIC.   
+
+
+We see that sales and popiularity of video games increased steadily, if not dramatically from 1980 to 2010. However, after around 2010, games released did not achieve the same amount of sales. In addition, we found that around 1995, the sales from North America increased dramatically in relation to sales from other regions such as Europe and Japan.
+
+We also see that there is a huge difference in the breakdown by genre for total sales between the 20th and 21st century. One big difference was the genre of action, which I expected would not be as big of a difference because action should've been prevalent in both 20th and 21st century video games. However, we saw a huge difference in the proportion of total video game sales that came from action between the 21st and 20th century. Using a hypothesis test, we can see that the difference was statistically significant and that there is a difference in proportion, signifying a change in possibly buying behavior and preferences. 
+
